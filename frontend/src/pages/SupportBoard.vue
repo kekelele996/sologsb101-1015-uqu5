@@ -14,7 +14,7 @@ import { useIdbTable } from '@/hooks/useIdbTable'
 import { useTreeStore } from '@/stores/treeStore'
 import { db, markSupportChecked } from '@/utils/db'
 import { SUPPORT_TYPE_OPTIONS, type Support, type SupportDraft, type SupportType } from '@/types/support'
-import { isSupportOverdue, nextCheckDate, overdueDays } from '@/utils/dimension'
+import { computeNextCheckDate, isSupportOverdue, overdueDays } from '@/utils/dimension'
 import { today } from '@/utils/id'
 
 const treeStore = useTreeStore()
@@ -56,7 +56,7 @@ const filtered = computed<Support[]>(() => {
     .filter((row) => {
       if (treeFilter.value !== 'all' && row.treeId !== treeFilter.value) return false
       if (typeFilter.value !== 'all' && row.type !== typeFilter.value) return false
-      if (overdueOnly.value && !isSupportOverdue(row.lastCheckDate, row.checkCycleMon)) return false
+      if (overdueOnly.value && !isSupportOverdue(row.nextCheckDate)) return false
       if (key === '') return true
       return (
         (treeLabel.value[row.treeId] ?? '').toLowerCase().includes(key) ||
@@ -68,7 +68,7 @@ const filtered = computed<Support[]>(() => {
 })
 
 const overdueRows = computed<Support[]>(() =>
-  rows.value.filter((row) => isSupportOverdue(row.lastCheckDate, row.checkCycleMon))
+  rows.value.filter((row) => isSupportOverdue(row.nextCheckDate))
 )
 
 const coveredTrees = computed<number>(() => new Set(rows.value.map((row) => row.treeId)).size)
@@ -78,7 +78,7 @@ onMounted(() => {
 })
 
 function rowClassName({ row }: { row: Support }): string {
-  return isSupportOverdue(row.lastCheckDate, row.checkCycleMon) ? 'row-overdue' : ''
+  return isSupportOverdue(row.nextCheckDate) ? 'row-overdue' : ''
 }
 
 function openCreate(): void {
@@ -113,11 +113,13 @@ async function handleSubmit(): Promise<void> {
   if (!valid) return
   submitting.value = true
   try {
+    // 下次检查日期由最近检查日期 + 检查周期计算（新建 / 编辑均按当前表单重算）
+    const nextCheckDate = computeNextCheckDate(form.lastCheckDate, form.checkCycleMon)
     if (editingId.value === null) {
-      await create({ ...form }, 'support')
+      await create({ ...form, nextCheckDate }, 'support')
       ElMessage.success('加固件已登记')
     } else {
-      await update(editingId.value, { ...form })
+      await update(editingId.value, { ...form, nextCheckDate })
       ElMessage.success('加固件已更新')
     }
     dialogVisible.value = false
@@ -181,8 +183,11 @@ function handleFilterChange(key: string, value: string): void {
         <div class="overdue-list">
           <div v-for="row in overdueRows" :key="row.id">
             {{ treeLabel[row.treeId] ?? '（古树已删除）' }} · {{ row.type }}：最近检查
-            {{ row.lastCheckDate || '未记录' }}，检查周期 {{ row.checkCycleMon }} 个月，已超期
-            {{ overdueDays(row.lastCheckDate, row.checkCycleMon) }} 天
+            {{ row.lastCheckDate || '未记录' }}，检查周期 {{ row.checkCycleMon }} 个月，
+            <template v-if="row.nextCheckDate === ''">尚未建立检查节奏，请尽快安排首次检查</template>
+            <template v-else>
+              应于 {{ row.nextCheckDate }} 前检查，已超期 {{ overdueDays(row.nextCheckDate) }} 天
+            </template>
           </div>
         </div>
       </template>
@@ -274,12 +279,13 @@ function handleFilterChange(key: string, value: string): void {
           </template>
         </el-table-column>
         <el-table-column label="下次检查" width="130">
-          <template #default="{ row }">{{ nextCheckDate(row.lastCheckDate, row.checkCycleMon) || '—' }}</template>
+          <template #default="{ row }">{{ row.nextCheckDate || '—' }}</template>
         </el-table-column>
         <el-table-column label="检查状态" width="180">
           <template #default="{ row }">
-            <el-tag v-if="isSupportOverdue(row.lastCheckDate, row.checkCycleMon)" type="danger" effect="dark">
-              超期 {{ overdueDays(row.lastCheckDate, row.checkCycleMon) }} 天
+            <el-tag v-if="row.nextCheckDate === ''" type="danger" effect="dark">待首次检查</el-tag>
+            <el-tag v-else-if="isSupportOverdue(row.nextCheckDate)" type="danger" effect="dark">
+              超期 {{ overdueDays(row.nextCheckDate) }} 天
             </el-tag>
             <el-tag v-else type="success" effect="light">周期内</el-tag>
           </template>
@@ -288,7 +294,7 @@ function handleFilterChange(key: string, value: string): void {
           <template #default="{ row }">
             <el-button
               link
-              :type="isSupportOverdue(row.lastCheckDate, row.checkCycleMon) ? 'danger' : 'primary'"
+              :type="isSupportOverdue(row.nextCheckDate) ? 'danger' : 'primary'"
               size="small"
               @click="handleMarkChecked(row)"
             >
@@ -343,8 +349,8 @@ function handleFilterChange(key: string, value: string): void {
           type="info"
           show-icon
           :closable="false"
-          :title="`下次检查日期：${nextCheckDate(form.lastCheckDate, form.checkCycleMon) || '请先填写最近检查日期'}`"
-          description="超过下次检查日期仍未登记检查的加固件，会在列表中自动高亮并出现在顶部提醒中。"
+          :title="`下次检查日期：${computeNextCheckDate(form.lastCheckDate, form.checkCycleMon) || '请先填写最近检查日期'}`"
+          description="下次检查日期按「最近检查日期 + 周期」计算；登记本次检查后沿用上一次应检查日期顺延，不会从登记当天重新起算。超过下次检查日期仍未登记检查的加固件，会在列表中自动高亮并出现在顶部提醒中。"
         />
       </el-form>
       <template #footer>

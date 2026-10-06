@@ -100,12 +100,12 @@ sologsb101-1015/
 
 * **持久化方案**：IndexedDB，通过 Dexie 封装（`src/utils/db.ts`）。
 * **数据库名**：`gbheritagetree`。
-* **数据结构版本**：`DB_SCHEMA_VERSION = 2`，`version(1)` 建立全部表，`version(2)` 补齐索引并执行 `.upgrade()` 迁移：
-  * `surveys` 增加 `[treeId+date]` 复合索引、`measures` 增加 `operator` 索引、`supports` 增加 `lastCheckDate` 索引、`reviews` 增加 `trend` 索引；
+* **数据结构版本**：`DB_SCHEMA_VERSION = 3`，`version(1)` 建立全部表，`version(2)` 补齐索引并执行 `.upgrade()` 迁移，`version(3)` 为 `supports` 补齐 `nextCheckDate`（下次检查日期）字段：
+  * `surveys` 增加 `[treeId+date]` 复合索引、`measures` 增加 `operator` 索引、`supports` 增加 `lastCheckDate` 与 `nextCheckDate` 索引、`reviews` 增加 `trend` 索引；
   * 回填 `revision` / `createdAt` / `updatedAt`；
   * 为 `trees` 补齐 `lastMeasureDate`（最近复壮日期）回写字段；
   * 为 `reviews` 补齐 `followUp`（后续措施）字段；
-  * 为 `supports` 补齐 `lastCheckDate` 与 `checkCycleMon` 缺省值。
+  * 为 `supports` 补齐 `lastCheckDate` 与 `checkCycleMon` 缺省值，并由最近检查日期 + 周期计算 `nextCheckDate`。
 * **表结构**：
 
   | 表 | 主键 | 主要索引 |
@@ -113,7 +113,7 @@ sologsb101-1015/
   | `trees` | id | code, species, protectLevel, ageYears, createdAt, updatedAt, owner |
   | `surveys` | id | treeId, [treeId+date], date, siteNote |
   | `measures` | id | treeId, type, state, date, operator |
-  | `supports` | id | treeId, type, installDate, lastCheckDate |
+  | `supports` | id | treeId, type, installDate, lastCheckDate, nextCheckDate |
   | `reviews` | id | treeId, date, vigor, trend |
 
 * **首屏演示数据**：`initDatabase()` 在打开数据库后检测 `trees` 表是否为空，为空则调用 `utils/seed.ts` 播种，
@@ -151,7 +151,9 @@ npm run preview      # 预览 dist 产物
 * **倾斜安全阈值**：< 5° 正常；5°–10° 需关注；> 10° 超限（`src/utils/dimension.ts`）。
 * **空洞风险**：1–2 处需关注，≥ 3 处判定为高风险，建议立即安排树洞修补与防腐处理。
 * **生长量年化**：由最近两次检查的差值按实际天数折算为「每年」增量，间隔不足 30 天时退回直接差值。
-* **加固件超期**：`最近检查日期 + 检查周期（月）` 早于今天即为超期，列表自动高亮并在顶部汇总提醒；
-  「登记本次检查」会把最近检查日期置为今天并解除高亮。
+* **加固件超期**：按「下次检查日期」判定，下次检查日期早于今天即为超期，列表自动高亮并在顶部汇总提醒。
+  下次检查日期口径为 **顺延**：登记本次检查后，下次检查日期沿用上一次应检查日期向后顺延一个周期，
+  而不是从登记当天重新起算，避免检查节奏越拖越松。最近检查日期为空（从未检查）时直接判定为超期，
+  提示尽快安排首次检查；首次登记则从登记当天起算一个周期。
 * **复评强制校验**：长势为「衰弱」或「濒危」时，后续措施为必填项，未填写无法保存。
 * **措施回写**：复壮措施状态改为「已完成」时，若实施日期晚于古树现有最近复壮日期，则自动回写该日期。

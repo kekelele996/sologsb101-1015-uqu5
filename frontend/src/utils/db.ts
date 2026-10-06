@@ -12,13 +12,14 @@ import type { Measure, MeasureState } from '../types/measure'
 import type { Support } from '../types/support'
 import type { Review } from '../types/review'
 import { nowIso, today } from './id'
+import { advanceNextCheckDate, computeNextCheckDate } from './dimension'
 import { seedDatabase } from './seed'
 
 /** 数据库名 */
 export const DB_NAME = 'gbheritagetree'
 
 /** 当前数据结构版本号（每次调整字段结构必须 +1 并补迁移） */
-export const DB_SCHEMA_VERSION = 2
+export const DB_SCHEMA_VERSION = 3
 
 /** 数据行结构修订号 */
 export const ROW_REVISION = 2
@@ -43,7 +44,7 @@ class HeritageTreeDatabase extends Dexie {
     })
 
     // ---------- v2：补齐索引与回写字段，并迁移历史数据 ----------
-    this.version(DB_SCHEMA_VERSION)
+    this.version(2)
       .stores({
         trees: 'id, code, species, protectLevel, ageYears, createdAt, updatedAt, owner',
         // 复合索引 [treeId+date]：按古树 + 日期快速取检查记录
@@ -80,6 +81,26 @@ class HeritageTreeDatabase extends Dexie {
         await tx.table('supports').toCollection().modify((row: Record<string, unknown>) => {
           if (typeof row.lastCheckDate !== 'string') row.lastCheckDate = ''
           if (typeof row.checkCycleMon !== 'number') row.checkCycleMon = 12
+        })
+      })
+
+    // ---------- v3：加固件补齐「下次检查日期」，统一超期口径 ----------
+    this.version(DB_SCHEMA_VERSION)
+      .stores({
+        trees: 'id, code, species, protectLevel, ageYears, createdAt, updatedAt, owner',
+        surveys: 'id, treeId, [treeId+date], date, siteNote',
+        measures: 'id, treeId, type, state, date, operator',
+        supports: 'id, treeId, type, installDate, lastCheckDate, nextCheckDate',
+        reviews: 'id, treeId, date, vigor, trend',
+      })
+      .upgrade(async (tx) => {
+        // 加固件补齐「下次检查日期」：由最近检查日期 + 检查周期计算
+        await tx.table('supports').toCollection().modify((row: Record<string, unknown>) => {
+          if (typeof row.nextCheckDate !== 'string') {
+            const last = typeof row.lastCheckDate === 'string' ? row.lastCheckDate : ''
+            const cycle = typeof row.checkCycleMon === 'number' ? row.checkCycleMon : 12
+            row.nextCheckDate = computeNextCheckDate(last, cycle)
+          }
         })
       })
   }
@@ -208,16 +229,25 @@ export async function listSupportsByTree(treeId: string): Promise<Support[]> {
 }
 
 export async function putSupport(row: Support): Promise<void> {
-  await db.supports.put({ ...row, updatedAt: nowIso(), revision: ROW_REVISION })
+  // 未显式携带下次检查日期时，由最近检查日期 + 周期计算（兼容旧调用路径）
+  const nextCheckDate = row.nextCheckDate ?? computeNextCheckDate(row.lastCheckDate, row.checkCycleMon)
+  await db.supports.put({ ...row, nextCheckDate, updatedAt: nowIso(), revision: ROW_REVISION })
 }
 
 export async function removeSupport(id: string): Promise<void> {
   await db.supports.delete(id)
 }
 
-/** 登记本次检查：把最近检查日期置为给定日期（默认今天） */
+/**
+ * 登记本次检查：把最近检查日期置为给定日期（默认今天），
+ * 并按「顺延」口径推进下次检查日期（从原下次检查日期向后顺延，而非从登记当天重算）。
+ */
 export async function markSupportChecked(id: string, date = today()): Promise<void> {
-  await db.supports.update(id, { lastCheckDate: date, updatedAt: nowIso() })
+  const row = await db.supports.get(id)
+  if (!row) return
+  const prevNext = row.nextCheckDate ?? ''
+  const nextCheckDate = advanceNextCheckDate(prevNext, date, row.checkCycleMon)
+  await db.supports.update(id, { lastCheckDate: date, nextCheckDate, updatedAt: nowIso() })
 }
 
 /* ------------------------------ 长势复评 ------------------------------ */
@@ -278,7 +308,14 @@ export async function importSnapshot(snapshot: DatabaseSnapshot): Promise<void> 
     await db.trees.bulkPut(snapshot.trees.map((row) => ({ ...row, revision: ROW_REVISION })))
     await db.surveys.bulkPut(snapshot.surveys.map((row) => ({ ...row, revision: ROW_REVISION })))
     await db.measures.bulkPut(snapshot.measures.map((row) => ({ ...row, revision: ROW_REVISION })))
-    await db.supports.bulkPut(snapshot.supports.map((row) => ({ ...row, revision: ROW_REVISION })))
+    await db.supports.bulkPut(
+      snapshot.supports.map((row) => ({
+        ...row,
+        // 兼容旧存档：缺少 nextCheckDate 时由最近检查日期 + 周期计算
+        nextCheckDate: row.nextCheckDate ?? computeNextCheckDate(row.lastCheckDate, row.checkCycleMon),
+        revision: ROW_REVISION,
+      })),
+    )
     await db.reviews.bulkPut(snapshot.reviews.map((row) => ({ ...row, revision: ROW_REVISION })))
   })
 }

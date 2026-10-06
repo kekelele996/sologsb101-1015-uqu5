@@ -100,27 +100,45 @@ export function worseVigor(a: Vigor, b: Vigor): Vigor {
 }
 
 /**
- * 加固件是否超期未检查。
- * 依据 installDate / lastCheckDate 加上 checkCycleMon 个月，与今天比较。
+ * 由最近检查日期与检查周期计算下次检查日期（用于新建 / 编辑 / 迁移时初始化）。
+ * 最近检查日期为空（从未检查）时返回空串，表示尚未建立检查节奏。
  */
-export function isSupportOverdue(lastCheckDate: string, checkCycleMon: number, reference = today()): boolean {
-  const base = lastCheckDate === '' ? '' : lastCheckDate
-  if (base === '') return true
-  const next = addMonths(base, checkCycleMon)
-  return next < reference
-}
-
-/** 加固件下次检查日期 */
-export function nextCheckDate(lastCheckDate: string, checkCycleMon: number): string {
+export function computeNextCheckDate(lastCheckDate: string, checkCycleMon: number): string {
   if (lastCheckDate === '') return ''
   return addMonths(lastCheckDate, checkCycleMon)
 }
 
-/** 超期天数 */
-export function overdueDays(lastCheckDate: string, checkCycleMon: number, reference = today()): number {
-  const next = nextCheckDate(lastCheckDate, checkCycleMon)
-  if (next === '') return 0
-  return Math.max(0, daysBetween(next, reference))
+/**
+ * 登记本次检查后，按「顺延」口径推进下次检查日期：
+ * 从原下次检查日期起按周期向后推进，直到严格晚于登记日期；
+ * 首次登记（原下次检查日期为空）时，从登记日期起算一个周期。
+ * 这样登记晚了也不会把节奏整体往后拖。
+ */
+export function advanceNextCheckDate(prevNext: string, regDate: string, checkCycleMon: number): string {
+  if (prevNext === '') return addMonths(regDate, checkCycleMon)
+  let next = prevNext
+  // 防御死循环：最多推进 1200 次（100 年），正常情况下一两次即跳出
+  for (let i = 0; i < 1200; i++) {
+    if (next > regDate) return next
+    next = addMonths(next, checkCycleMon)
+  }
+  return next
+}
+
+/**
+ * 加固件是否超期未检查。
+ * 依据「下次检查日期」与今天比较：下次检查日期早于今天即为超期；
+ * 下次检查日期为空（从未检查）时直接判定为超期，提示尽快安排首次检查。
+ */
+export function isSupportOverdue(nextCheckDate: string, reference = today()): boolean {
+  if (nextCheckDate === '') return true
+  return nextCheckDate < reference
+}
+
+/** 超期天数：下次检查日期早于今天的天数；下次检查日期为空时返回 0 */
+export function overdueDays(nextCheckDate: string, reference = today()): number {
+  if (nextCheckDate === '') return 0
+  return Math.max(0, daysBetween(nextCheckDate, reference))
 }
 
 /** 日期加 n 个月，返回 YYYY-MM-DD */

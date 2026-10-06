@@ -92,6 +92,7 @@ export function buildTreeCsv(
     '管护单位',
     '检查次数',
     '最近检查日期',
+    '下次检查日期',
     '树高(m)',
     '胸径(cm)',
     '冠幅(m)',
@@ -115,7 +116,11 @@ export function buildTreeCsv(
     const treeSupports = supports.filter((row) => row.treeId === tree.id)
     const treeReviews = reviews.filter((row) => row.treeId === tree.id).sort((a, b) => a.date.localeCompare(b.date))
     const latestReview = treeReviews.length > 0 ? treeReviews[treeReviews.length - 1] : null
-    const overdue = treeSupports.filter((row) => isSupportOverdue(row.lastCheckDate, row.checkCycleMon))
+    const overdue = treeSupports.filter((row) => isSupportOverdue(row.nextCheckDate))
+    const nextCheckDates =
+      treeSupports.length === 0
+        ? '—'
+        : treeSupports.map((row) => (row.nextCheckDate === '' ? '待首次检查' : row.nextCheckDate)).join('；')
     lines.push(
       [
         tree.code,
@@ -126,6 +131,7 @@ export function buildTreeCsv(
         tree.owner,
         treeSurveys.length,
         latest === null ? '—' : latest.date,
+        nextCheckDates,
         latest === null ? 0 : latest.heightM,
         latest === null ? 0 : latest.dbhCm,
         latest === null ? 0 : latest.crownM,
@@ -136,7 +142,15 @@ export function buildTreeCsv(
         treeMeasures.filter((row) => row.state === '已完成').length,
         tree.lastMeasureDate === '' ? '—' : tree.lastMeasureDate,
         treeSupports.length,
-        overdue.length === 0 ? '无' : overdue.map((row) => `${row.type}超期 ${overdueDays(row.lastCheckDate, row.checkCycleMon)} 天`).join('；'),
+        overdue.length === 0
+          ? '无'
+          : overdue
+              .map((row) =>
+                row.nextCheckDate === ''
+                  ? `${row.type}待首次检查`
+                  : `${row.type}超期 ${overdueDays(row.nextCheckDate)} 天`,
+              )
+              .join('；'),
         treeReviews.length,
         latestReview === null ? '—' : latestReview.vigor,
         latestReview === null ? '—' : latestReview.trend,
@@ -185,7 +199,7 @@ export function buildTodoText(
   trees.forEach((tree) => {
     const pending = measures.filter((row) => row.treeId === tree.id && row.state !== '已完成').length
     const overdue = supports.filter(
-      (row) => row.treeId === tree.id && isSupportOverdue(row.lastCheckDate, row.checkCycleMon),
+      (row) => row.treeId === tree.id && isSupportOverdue(row.nextCheckDate),
     ).length
     const treeReviews = reviews.filter((row) => row.treeId === tree.id).sort((a, b) => a.date.localeCompare(b.date))
     const latest = treeReviews.length > 0 ? treeReviews[treeReviews.length - 1] : null
