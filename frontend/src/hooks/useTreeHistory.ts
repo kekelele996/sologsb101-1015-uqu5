@@ -65,7 +65,7 @@ export function buildHistory(
       kind: 'support',
       date: row.installDate,
       title: `加固件 · ${row.type}`,
-      detail: `安装于 ${row.installDate}，检查周期 ${row.checkCycleMon} 个月，最近检查 ${row.lastCheckDate || '未记录'}`,
+      detail: `安装于 ${row.installDate}，检查周期 ${row.checkCycleMon} 个月，最近检查 ${row.lastCheckDate || '未记录'}，应检日期 ${row.nextCheckDate || '—'}`,
       badge: row.type,
     })
   })

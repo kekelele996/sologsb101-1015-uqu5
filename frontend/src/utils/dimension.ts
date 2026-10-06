@@ -100,27 +100,91 @@ export function worseVigor(a: Vigor, b: Vigor): Vigor {
 }
 
 /**
- * 加固件是否超期未检查。
- * 依据 installDate / lastCheckDate 加上 checkCycleMon 个月，与今天比较。
+ * 加固件检查排期（全系统统一口径，见 types/support.ts 的 nextCheckDate 字段说明）：
+ *
+ * 下次应检查日期是一条「固定排期」——每次登记检查，都从**上一次应检查日期**
+ * 顺推一个周期；若已经连续错过多个周期，则一路顺推到登记日之后的第一个应检日。
+ * 因此逾期后再补检，检查节奏也不会被推松。
+ *
+ * - 从未检查的件：以安装日期作为首个周期起点，安装后满一个周期仍未首检即超期；
+ * - 周期刚被调短 / 调长：以最近检查日期（未检查过则以安装日期）为锚点用新周期重排，
+ *   新应检日落在今天之前就如实显示超期，不顺推、不掩盖欠账；
+ * - 一次拖过多个周期：登记一次只把排期推到「登记日之后」的第一个应检日，错过的周期不被注销。
  */
-export function isSupportOverdue(lastCheckDate: string, checkCycleMon: number, reference = today()): boolean {
-  const base = lastCheckDate === '' ? '' : lastCheckDate
-  if (base === '') return true
-  const next = addMonths(base, checkCycleMon)
-  return next < reference
+
+/** 排期锚点：有最近检查日期用最近检查日期，否则用安装日期 */
+export function supportScheduleBase(lastCheckDate: string, installDate: string): string {
+  return lastCheckDate !== '' ? lastCheckDate : installDate
 }
 
-/** 加固件下次检查日期 */
-export function nextCheckDate(lastCheckDate: string, checkCycleMon: number): string {
-  if (lastCheckDate === '') return ''
-  return addMonths(lastCheckDate, checkCycleMon)
+/**
+ * 按固定排期口径计算登记本次检查后的下次应检查日期。
+ * @param previousDue 登记前的下次应检查日期（固化排期，可能为空，兼容旧数据）
+ * @param lastCheckDate 最近检查日期（登记后即本次检查日期）
+ * @param installDate 安装日期，从未有过排期时作为首个周期起点
+ * @param checkCycleMon 检查周期（月）
+ * @param checkDate 本次检查日期，默认今天
+ */
+export function scheduleNextCheck(
+  previousDue: string,
+  lastCheckDate: string,
+  installDate: string,
+  checkCycleMon: number,
+  checkDate: string = today(),
+): string {
+  // 旧数据没有固化排期时，以本次检查日期为锚点补建排期
+  const start = previousDue !== '' ? previousDue : supportScheduleBase(lastCheckDate, installDate)
+  if (start === '') return ''
+  let next = addMonths(start, checkCycleMon)
+  // 已连续错过多个周期：一路顺推到本次检查日之后的第一个应检日
+  while (next <= checkDate) {
+    next = addMonths(next, checkCycleMon)
+  }
+  return next
 }
 
-/** 超期天数 */
-export function overdueDays(lastCheckDate: string, checkCycleMon: number, reference = today()): number {
-  const next = nextCheckDate(lastCheckDate, checkCycleMon)
-  if (next === '') return 0
-  return Math.max(0, daysBetween(next, reference))
+/**
+ * 按锚点直接推算下次应检查日期（不做顺推）：
+ * 最近检查日期（未检查过则用安装日期）+ 一个周期。
+ * 用于新建 / 编辑加固件与旧数据回填——即使结果落在今天之前也保留，
+ * 这样「从未检查」「周期刚被调短」的件保存后会立刻如实显示为超期。
+ */
+export function anchorNextCheckDate(lastCheckDate: string, installDate: string, checkCycleMon: number): string {
+  const base = supportScheduleBase(lastCheckDate, installDate)
+  return base === '' ? '' : addMonths(base, checkCycleMon)
+}
+
+/**
+ * 加固件是否超期未检查。
+ * 统一读取固化的下次应检查日期；无固化排期的旧数据用安装日期兜底按周期推算。
+ */
+export function isSupportOverdue(support: {
+  lastCheckDate: string
+  installDate: string
+  checkCycleMon: number
+  nextCheckDate?: string
+}, reference = today()): boolean {
+  const due = support.nextCheckDate ?? anchorNextCheckDate(support.lastCheckDate, support.installDate, support.checkCycleMon)
+  if (due === '') return true
+  return due < reference
+}
+
+/**
+ * 超期天数：相对应检查日期已过去的整天数；未到期为 0。
+ * 从未检查 / 无固化排期时同样按固定排期口径取应检日。
+ */
+export function overdueDays(
+  support: {
+    lastCheckDate: string
+    installDate: string
+    checkCycleMon: number
+    nextCheckDate?: string
+  },
+  reference = today(),
+): number {
+  const due = support.nextCheckDate ?? anchorNextCheckDate(support.lastCheckDate, support.installDate, support.checkCycleMon)
+  if (due === '') return 0
+  return Math.max(0, daysBetween(due, reference))
 }
 
 /** 日期加 n 个月，返回 YYYY-MM-DD */

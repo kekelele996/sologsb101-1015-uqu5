@@ -1,7 +1,7 @@
 /**
  * IndexedDB 持久化层（Dexie 封装）
  * - 数据库名：gbheritagetree
- * - 含数据结构版本号与 v1 → v2 升级迁移逻辑（升级时按 version().stores() 补齐索引）
+ * - 含数据结构版本号与 v1 → v3 升级迁移逻辑（升级时按 version().stores() 补齐索引）
  * - 提供各表增删改查、整库快照导入导出与重置
  * 纯前端应用：不依赖任何后端服务或外部接口。
  */
@@ -12,16 +12,25 @@ import type { Measure, MeasureState } from '../types/measure'
 import type { Support } from '../types/support'
 import type { Review } from '../types/review'
 import { nowIso, today } from './id'
+import { anchorNextCheckDate, scheduleNextCheck } from './dimension'
 import { seedDatabase } from './seed'
 
 /** 数据库名 */
 export const DB_NAME = 'gbheritagetree'
 
 /** 当前数据结构版本号（每次调整字段结构必须 +1 并补迁移） */
-export const DB_SCHEMA_VERSION = 2
+export const DB_SCHEMA_VERSION = 3
 
 /** 数据行结构修订号 */
-export const ROW_REVISION = 2
+export const ROW_REVISION = 3
+
+/**
+ * 旧数据没有固化排期时，按固定排期口径补出下次应检查日期：
+ * 以最近检查日期（未检查过则以安装日期）为锚点顺推一个周期，已逾期的保留历史欠账不顺推。
+ */
+function initialNextCheckDate(row: Pick<Support, 'lastCheckDate' | 'installDate' | 'checkCycleMon'>): string {
+  return anchorNextCheckDate(row.lastCheckDate, row.installDate, row.checkCycleMon)
+}
 
 class HeritageTreeDatabase extends Dexie {
   trees!: Table<Tree, string>
@@ -43,7 +52,7 @@ class HeritageTreeDatabase extends Dexie {
     })
 
     // ---------- v2：补齐索引与回写字段，并迁移历史数据 ----------
-    this.version(DB_SCHEMA_VERSION)
+    this.version(2)
       .stores({
         trees: 'id, code, species, protectLevel, ageYears, createdAt, updatedAt, owner',
         // 复合索引 [treeId+date]：按古树 + 日期快速取检查记录
@@ -80,6 +89,32 @@ class HeritageTreeDatabase extends Dexie {
         await tx.table('supports').toCollection().modify((row: Record<string, unknown>) => {
           if (typeof row.lastCheckDate !== 'string') row.lastCheckDate = ''
           if (typeof row.checkCycleMon !== 'number') row.checkCycleMon = 12
+        })
+      })
+
+    // ---------- v3：加固件固化下次应检查日期（固定排期口径） ----------
+    this.version(DB_SCHEMA_VERSION)
+      .stores({
+        trees: 'id, code, species, protectLevel, ageYears, createdAt, updatedAt, owner',
+        surveys: 'id, treeId, [treeId+date], date, siteNote',
+        measures: 'id, treeId, type, state, date, operator',
+        supports: 'id, treeId, type, installDate, lastCheckDate',
+        reviews: 'id, treeId, date, vigor, trend',
+      })
+      .upgrade(async (tx) => {
+        // 迁移 5：把「最近检查 + 周期」推算出的下次检查日期固化到行内，作为全系统唯一排期依据。
+        // 已超期的件保留原应检日（不顺推），迁移后依旧如实显示超期与超期天数。
+        await tx.table('supports').toCollection().modify((row: Record<string, unknown>) => {
+          if (typeof row.lastCheckDate !== 'string') row.lastCheckDate = ''
+          if (typeof row.checkCycleMon !== 'number') row.checkCycleMon = 12
+          if (typeof row.installDate !== 'string') row.installDate = ''
+          if (typeof row.nextCheckDate !== 'string' || row.nextCheckDate === '') {
+            row.nextCheckDate = initialNextCheckDate({
+              lastCheckDate: row.lastCheckDate as string,
+              installDate: row.installDate as string,
+              checkCycleMon: row.checkCycleMon as number,
+            })
+          }
         })
       })
   }
@@ -207,17 +242,42 @@ export async function listSupportsByTree(treeId: string): Promise<Support[]> {
   return db.supports.where('treeId').equals(treeId).toArray()
 }
 
+/**
+ * 写入加固件。
+ * 下次应检查日期一律按「锚点（最近检查日期，缺省取安装日期）+ 周期」重算固化，
+ * 使本函数成为排期唯一权威：任何路径改周期 / 改检查日期后都不会残留旧排期。
+ * （「登记本次检查」走 markSupportChecked，按上次应检日顺延，是唯一的例外口径。）
+ */
 export async function putSupport(row: Support): Promise<void> {
-  await db.supports.put({ ...row, updatedAt: nowIso(), revision: ROW_REVISION })
+  const nextCheckDate = initialNextCheckDate(row)
+  await db.supports.put({ ...row, nextCheckDate, updatedAt: nowIso(), revision: ROW_REVISION })
 }
 
 export async function removeSupport(id: string): Promise<void> {
   await db.supports.delete(id)
 }
 
-/** 登记本次检查：把最近检查日期置为给定日期（默认今天） */
-export async function markSupportChecked(id: string, date = today()): Promise<void> {
-  await db.supports.update(id, { lastCheckDate: date, updatedAt: nowIso() })
+/**
+ * 登记本次检查（固定排期口径）。
+ * 最近检查日期置为本次检查日期，下次应检查日期从上一次应检查日期顺延一个周期；
+ * 已连续错过多个周期时，顺推到本次检查日之后的第一个应检日，逾期补检不会把节奏推松。
+ * 返回重新排定的下次应检查日期（件不存在时返回空串）。
+ */
+export async function markSupportChecked(id: string, date = today()): Promise<string> {
+  let nextCheckDate = ''
+  await db.transaction('rw', db.supports, async () => {
+    const row = await db.supports.get(id)
+    if (!row) return
+    nextCheckDate = scheduleNextCheck(
+      row.nextCheckDate ?? '',
+      date,
+      row.installDate,
+      row.checkCycleMon,
+      date,
+    )
+    await db.supports.update(id, { lastCheckDate: date, nextCheckDate, updatedAt: nowIso() })
+  })
+  return nextCheckDate
 }
 
 /* ------------------------------ 长势复评 ------------------------------ */
@@ -278,7 +338,17 @@ export async function importSnapshot(snapshot: DatabaseSnapshot): Promise<void> 
     await db.trees.bulkPut(snapshot.trees.map((row) => ({ ...row, revision: ROW_REVISION })))
     await db.surveys.bulkPut(snapshot.surveys.map((row) => ({ ...row, revision: ROW_REVISION })))
     await db.measures.bulkPut(snapshot.measures.map((row) => ({ ...row, revision: ROW_REVISION })))
-    await db.supports.bulkPut(snapshot.supports.map((row) => ({ ...row, revision: ROW_REVISION })))
+    await db.supports.bulkPut(
+      snapshot.supports.map((row) => ({
+        ...row,
+        // 兼容旧版存档（v2 及以前无固化排期）：按固定排期口径补建
+        nextCheckDate:
+          typeof row.nextCheckDate === 'string' && row.nextCheckDate !== ''
+            ? row.nextCheckDate
+            : initialNextCheckDate(row),
+        revision: ROW_REVISION,
+      })),
+    )
     await db.reviews.bulkPut(snapshot.reviews.map((row) => ({ ...row, revision: ROW_REVISION })))
   })
 }
